@@ -17,6 +17,7 @@ class Team
   field :revenue, type: BigDecimal
   field :color, type: String
   field :custom_field, type: String
+  field :main_sponsor, type: Integer
 
   has_many :players, inverse_of: :team, order: :_id.asc
   has_and_belongs_to_many :fans
@@ -36,7 +37,7 @@ class Team
   validates_length_of :mascot, maximum: 100
 
   def player_names_truncated
-    players.collect { |p| p.name }.join(', ')[0..32]
+    players.collect(&:name).join(', ')[0..32]
   end
 
   def color_enum

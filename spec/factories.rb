@@ -43,13 +43,16 @@ FactoryGirl.define do
   factory :user do
     sequence(:email) { |n| "username_#{n}@example.com" }
     sequence(:password) { |_n| 'password' }
+
+    factory :user_confirmed, class: User::Confirmed
   end
 
   factory :field_test do
   end
 
   factory :comment do
-    sequence(:content) do |n| <<-EOF
+    sequence(:content) do |n|
+      <<-EOF
         Lorém --#{n}-- ipsum dolor sit amet, consectetur adipisicing elit, sed do eiusmod
         tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam,
         quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo
@@ -58,10 +61,14 @@ FactoryGirl.define do
         proident, sunt in culpa qui officia deserunt mollit anim id est laborum."
       EOF
     end
+
+    factory :comment_confirmed, class: Comment::Confirmed do
+      content('something')
+    end
   end
 
   factory :ball do
-    color(%w[red blue green yellow purple brown black white].sample)
+    color(%w(red blue green yellow purple brown black white).sample)
   end
 
   factory :hardball do
@@ -70,5 +77,9 @@ FactoryGirl.define do
 
   factory :image do
     file File.open(Rails.root.join('public', 'robots.txt'))
+  end
+
+  factory :paper_trail_test do
+    sequence(:name) { |n| "name #{n}" }
   end
 end

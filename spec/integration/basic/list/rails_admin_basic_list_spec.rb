@@ -3,7 +3,6 @@
 require 'spec_helper'
 
 describe 'RailsAdmin Basic List', type: :request do
-
   subject { page }
 
   describe 'GET /admin' do
@@ -16,7 +15,7 @@ describe 'RailsAdmin Basic List', type: :request do
     it "redirects to dashboard and inform the user the model wasn't found" do
       visit '/admin/whatever'
       expect(page.driver.status_code).to eq(404)
-      expect(find('.alert-error')).to have_content("Model 'Whatever' could not be found")
+      expect(find('.alert-danger')).to have_content("Model 'Whatever' could not be found")
     end
   end
 
@@ -24,7 +23,7 @@ describe 'RailsAdmin Basic List', type: :request do
     it "redirects to balls index and inform the user the id wasn't found" do
       visit '/admin/ball/545-typo'
       expect(page.driver.status_code).to eq(404)
-      expect(find('.alert-error')).to have_content("Ball with id '545-typo' could not be found")
+      expect(find('.alert-danger')).to have_content("Ball with id '545-typo' could not be found")
     end
   end
 
@@ -56,7 +55,7 @@ describe 'RailsAdmin Basic List', type: :request do
 
   describe 'GET /admin/player' do
     before do
-      @teams = 2.times.collect do
+      @teams = Array.new(2) do
         FactoryGirl.create(:team)
       end
       @players = [
@@ -65,6 +64,7 @@ describe 'RailsAdmin Basic List', type: :request do
         FactoryGirl.create(:player, retired: false, injured: true, team: @teams[1]),
         FactoryGirl.create(:player, retired: false, injured: false, team: @teams[1]),
       ]
+      @comment = FactoryGirl.create(:comment, commentable: @players[2])
     end
 
     it 'allows to query on any attribute' do
@@ -271,67 +271,148 @@ describe 'RailsAdmin Basic List', type: :request do
       is_expected.to have_no_content(@players[3].name)
     end
 
-    it 'displays base filters when no filters are present in the params' do
+    it 'allows to search a has_many attribute over the target table' do
       RailsAdmin.config Player do
         list do
-          filters [:name, :team]
+          field PK_COLUMN
+          field :name
+          field :comments do
+            searchable :content
+          end
+        end
+      end
+      visit index_path(model_name: 'player', f: {comments: {'1' => {v: @comment.content}}})
+      is_expected.to have_no_content(@players[0].name)
+      is_expected.to have_no_content(@players[1].name)
+      is_expected.to have_content(@players[2].name)
+      is_expected.to have_no_content(@players[3].name)
+    end
+
+    it 'displays base filters when no filters are present in the params' do
+      RailsAdmin.config Player do
+        list { filters([:name, :team]) }
+      end
+      get index_path(model_name: 'player')
+
+      options = {
+        index: 1,
+        label: 'Name',
+        name: 'name',
+        type: 'string',
+        value: '',
+        operator: nil,
+      }
+      expect(response.body).to include("$.filters.append(#{options.to_json});")
+
+      options = {
+        index: 2,
+        label: 'Team',
+        name: 'team',
+        type: 'belongs_to_association',
+        value: '',
+        operator: nil,
+      }
+      expect(response.body).to include("$.filters.append(#{options.to_json});")
+    end
+  end
+
+  describe 'GET /admin/player with 2 objects' do
+    before do
+      @players = FactoryGirl.create_list(:player, 2)
+      visit index_path(model_name: 'player')
+    end
+
+    it "shows \"2 results\"" do
+      is_expected.to have_content('2 players')
+    end
+  end
+
+  describe 'GET /admin/player with 2 objects' do
+    before do
+      @players = FactoryGirl.create_list(:player, 2)
+      visit index_path(model_name: 'player')
+    end
+
+    it "shows \"2 results\"" do
+      is_expected.to have_content('2 players')
+    end
+  end
+
+  context 'List with 3 pages' do
+    def visit_page(page)
+      visit index_path(model_name: 'player', page: page)
+    end
+
+    before do
+      RailsAdmin.config.default_items_per_page = 1
+      (RailsAdmin.config.default_items_per_page * 3).times { FactoryGirl.create(:player) }
+    end
+
+    describe 'with limited_pagination=false' do
+      it 'page 1' do
+        visit_page(1)
+
+        within('ul.pagination') do
+          expect(find('li:first')).to have_content('« Prev')
+          expect(find('li:last')).to have_content('Next »')
+          expect(find('li.active')).to have_content('1')
         end
       end
 
-      get index_path(model_name: 'player')
-      expect(response.body).to include(%{$.filters.append("Name", "name", "string", "", null, "", 1);}) # rubocop:disable StringLiterals
-      expect(response.body).to include(%{$.filters.append("Team", "team", "belongs_to_association", "", null, "", 2);}) # rubocop:diasble StringLiterals
-    end
-  end
+      it 'page 2' do
+        visit_page(2)
 
-  describe 'GET /admin/player with 2 objects' do
-    before do
-      @players = 2.times.collect { FactoryGirl.create :player }
-      visit index_path(model_name: 'player')
-    end
+        within('ul.pagination') do
+          expect(find('li:first')).to have_content('« Prev')
+          expect(find('li:last')).to have_content('Next »')
+          expect(find('li.active')).to have_content('2')
+        end
+      end
 
-    it "shows \"2 results\"" do
-      is_expected.to have_content('2 players')
-    end
-  end
+      it 'page 3' do
+        visit_page(3)
 
-  describe 'GET /admin/player with 2 objects' do
-    before do
-      @players = 2.times.collect { FactoryGirl.create :player }
-      visit index_path(model_name: 'player')
+        within('ul.pagination') do
+          expect(find('li:first')).to have_content('« Prev')
+          expect(find('li:last')).to have_content('Next »')
+          expect(find('li.active')).to have_content('3')
+        end
+      end
     end
 
-    it "shows \"2 results\"" do
-      is_expected.to have_content('2 players')
-    end
-  end
+    context 'with limited_pagination=true' do
+      before do
+        allow(RailsAdmin::AbstractModel.new(Player).config.list).
+          to receive(:limited_pagination).
+          and_return(true)
+      end
 
-  describe 'GET /admin/player with 3 pages, page 2' do
-    before do
-      RailsAdmin.config.default_items_per_page = 1
-      items_per_page = RailsAdmin.config.default_items_per_page
-      (items_per_page * 3).times { FactoryGirl.create(:player) }
-      visit index_path(model_name: 'player', page: 2)
-    end
+      it 'page 1' do
+        visit_page(1)
 
-    it 'paginates correctly' do
-      expect(find('.pagination ul li:first')).to have_content('« Prev')
-      expect(find('.pagination ul li:last')).to have_content('Next »')
-      expect(find('.pagination ul li.active')).to have_content('2')
-    end
-  end
+        within('ul.pagination') do
+          expect(find('li:first')).not_to have_content('« Prev')
+          expect(find('li:last')).to have_content('Next »')
+        end
+      end
 
-  describe 'list with 3 pages, page 3' do
-    before do
-      items_per_page = RailsAdmin.config.default_items_per_page
-      @players = (items_per_page * 3).times.collect { FactoryGirl.create(:player) }
-      visit index_path(model_name: 'player', page: 3)
-    end
+      it 'page 2' do
+        visit_page(2)
 
-    it 'paginates correctly and contain the right item' do
-      expect(find('.pagination ul li:first')).to have_content('« Prev')
-      expect(find('.pagination ul li:last')).to have_content('Next »')
-      expect(find('.pagination ul li.active')).to have_content('3')
+        within('ul.pagination') do
+          expect(find('li:first')).to have_content('« Prev')
+          expect(find('li:last')).to have_content('Next »')
+        end
+      end
+
+      it 'page 3' do
+        visit_page(3)
+
+        within('ul.pagination') do
+          expect(find('li:first')).to have_content('« Prev')
+          expect(find('li:last')).to have_content('Next »')
+        end
+      end
     end
   end
 
@@ -344,7 +425,7 @@ describe 'RailsAdmin Basic List', type: :request do
     end
 
     it 'responds successfully with multiple models' do
-      2.times.collect { FactoryGirl.create :player }
+      FactoryGirl.create_list(:player, 2)
       visit index_path(model_name: 'player', all: true)
       expect(find('div.total-count')).to have_content('2 players')
     end
@@ -353,7 +434,7 @@ describe 'RailsAdmin Basic List', type: :request do
   describe 'GET /admin/player show with pagination disabled by :associated_collection' do
     it 'responds successfully' do
       @team = FactoryGirl.create :team
-      2.times.collect { FactoryGirl.create :player, team: @team }
+      Array.new(2) { FactoryGirl.create :player, team: @team }
       visit index_path(model_name: 'player', associated_collection: 'players', compact: true, current_action: 'update', source_abstract_model: 'team', source_object_id: @team.id)
       expect(find('div.total-count')).to have_content('2 players')
     end
@@ -361,7 +442,7 @@ describe 'RailsAdmin Basic List', type: :request do
 
   describe 'list as compact json' do
     it 'has_content an array with 2 elements and contain an array of elements with keys id and label' do
-      2.times.collect { FactoryGirl.create :player }
+      FactoryGirl.create_list(:player, 2)
       get index_path(model_name: 'player', compact: true, format: :json)
       expect(ActiveSupport::JSON.decode(response.body).length).to eq(2)
       ActiveSupport::JSON.decode(response.body).each do |object|
@@ -378,7 +459,7 @@ describe 'RailsAdmin Basic List', type: :request do
       expect(Player.count).to eq(0)
     end
 
-    it 'finds the player if the query matches the default search opeartor' do
+    it 'finds the player if the query matches the default search operator' do
       RailsAdmin.config do |config|
         config.default_search_operator = 'ends_with'
         config.model Player do
@@ -389,7 +470,7 @@ describe 'RailsAdmin Basic List', type: :request do
       is_expected.to have_content(player.name)
     end
 
-    it 'does not find the player if the query does not match the default search opeartor' do
+    it 'does not find the player if the query does not match the default search operator' do
       RailsAdmin.config do |config|
         config.default_search_operator = 'ends_with'
         config.model Player do
@@ -433,11 +514,10 @@ describe 'RailsAdmin Basic List', type: :request do
     end
 
     it 'shows the show, edit and delete links with valid url' do
-      is_expected.to have_selector("td a[href='/admin/ball/#{@ball.id}']")
-      is_expected.to have_selector("td a[href='/admin/ball/#{@ball.id}/edit']")
-      is_expected.to have_selector("td a[href='/admin/ball/#{@ball.id}/delete']")
+      is_expected.to have_selector("td a[href$='/admin/ball/#{@ball.id}']")
+      is_expected.to have_selector("td a[href$='/admin/ball/#{@ball.id}/edit']")
+      is_expected.to have_selector("td a[href$='/admin/ball/#{@ball.id}/delete']")
     end
-
   end
 
   describe 'Scopes' do
@@ -453,7 +533,7 @@ describe 'RailsAdmin Basic List', type: :request do
         FactoryGirl.create(:team, color: 'red'),
         FactoryGirl.create(:team, color: 'red'),
         FactoryGirl.create(:team, color: 'white'),
-        FactoryGirl.create(:team, color: 'black')
+        FactoryGirl.create(:team, color: 'black'),
       ]
     end
 
@@ -498,7 +578,7 @@ describe 'RailsAdmin Basic List', type: :request do
       before :each do
         en = {admin: {scopes: {
           _all: 'every',
-          red: 'krasnyj'
+          red: 'krasnyj',
         }}}
         I18n.backend.store_translations(:en, en)
       end
@@ -517,7 +597,7 @@ describe 'RailsAdmin Basic List', type: :request do
         before :each do
           en = {admin: {scopes: {team: {
             _all: 'any',
-            red: 'kr'
+            red: 'kr',
           }}}}
           I18n.backend.store_translations(:en, en)
         end
@@ -531,6 +611,29 @@ describe 'RailsAdmin Basic List', type: :request do
           expect(find('#scope_selector li.active')).to have_content('any')
         end
       end
+    end
+  end
+
+  describe 'Row CSS class' do
+    before do
+      RailsAdmin.config do |config|
+        config.model Team do
+          list do
+            row_css_class { 'my_class' }
+          end
+        end
+      end
+      @teams = [
+        FactoryGirl.create(:team, color: 'red'),
+        FactoryGirl.create(:team, color: 'red'),
+        FactoryGirl.create(:team, color: 'white'),
+        FactoryGirl.create(:team, color: 'black'),
+      ]
+    end
+
+    it 'appends the CSS class to the model row class' do
+      visit index_path(model_name: 'team')
+      expect(page).to have_css('tr.team_row.my_class')
     end
   end
 end

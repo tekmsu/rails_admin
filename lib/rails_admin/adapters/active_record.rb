@@ -6,7 +6,7 @@ require 'rails_admin/adapters/active_record/property'
 module RailsAdmin
   module Adapters
     module ActiveRecord
-      DISABLED_COLUMN_TYPES = [:tsvector, :blob, :binary, :spatial, :hstore, :geometry]
+      DISABLED_COLUMN_TYPES = [:tsvector, :blob, :binary, :spatial, :hstore, :geometry].freeze
 
       def new(params = {})
         AbstractObject.new(model.new(params))
@@ -40,7 +40,7 @@ module RailsAdmin
       end
 
       def count(options = {}, scope = nil)
-        all(options.merge(limit: false, page: false), scope).count
+        all(options.merge(limit: false, page: false), scope).count(:all)
       end
 
       def destroy(objects)
@@ -67,9 +67,16 @@ module RailsAdmin
       delegate :primary_key, :table_name, to: :model, prefix: false
 
       def encoding
-        encoding = ::ActiveRecord::Base.connection.try(:encoding)
-        encoding ||= ::ActiveRecord::Base.connection.try(:charset) # mysql2
-        encoding || 'UTF-8'
+        case ::ActiveRecord::Base.connection_config[:adapter]
+        when 'postgresql'
+          ::ActiveRecord::Base.connection.select_one("SELECT ''::text AS str;").values.first.encoding
+        when 'mysql2'
+          ::ActiveRecord::Base.connection.instance_variable_get(:@connection).encoding
+        when 'oracle_enhanced'
+          ::ActiveRecord::Base.connection.select_one("SELECT dummy FROM DUAL").values.first.encoding
+        else
+          ::ActiveRecord::Base.connection.select_one("SELECT '' AS str;").values.first.encoding
+        end
       end
 
       def embedded?
@@ -94,6 +101,12 @@ module RailsAdmin
 
         def add(field, value, operator)
           field.searchable_columns.flatten.each do |column_infos|
+            value =
+              if value.is_a?(Array)
+                value.map { |v| field.parse_value(v) }
+              else
+                field.parse_value(value)
+              end
             statement, value1, value2 = StatementBuilder.new(column_infos[:column], column_infos[:type], value, operator).to_statement
             @statements << statement if statement.present?
             @values << value1 unless value1.nil?
@@ -105,7 +118,7 @@ module RailsAdmin
 
         def build
           scope = @scope.where(@statements.join(' OR '), *@values)
-          scope = scope.references(*(@tables.uniq)) if @tables.any?
+          scope = scope.references(*@tables.uniq) if @tables.any?
           scope
         end
       end
@@ -113,7 +126,7 @@ module RailsAdmin
       def query_scope(scope, query, fields = config.list.fields.select(&:queryable?))
         wb = WhereBuilder.new(scope)
         fields.each do |field|
-          wb.add(field, query, field.search_operator)
+          wb.add(field, field.parse_value(query), field.search_operator)
         end
         # OR all query statements
         wb.build
@@ -125,7 +138,10 @@ module RailsAdmin
         filters.each_pair do |field_name, filters_dump|
           filters_dump.each do |_, filter_dump|
             wb = WhereBuilder.new(scope)
-            wb.add(fields.detect { |f| f.name.to_s == field_name }, filter_dump[:v], (filter_dump[:o] || 'default'))
+            field = fields.detect { |f| f.name.to_s == field_name }
+            value = parse_field_value(field, filter_dump[:v])
+
+            wb.add(field, value, (filter_dump[:o] || 'default'))
             # AND current filter statements to other filter statements
             scope = wb.build
           end
@@ -141,17 +157,35 @@ module RailsAdmin
       protected
 
         def unary_operators
+          case @type
+          when :boolean
+            boolean_unary_operators
+          else
+            generic_unary_operators
+          end
+        end
+
+      private
+
+        def generic_unary_operators
           {
             '_blank' => ["(#{@column} IS NULL OR #{@column} = '')"],
             '_present' => ["(#{@column} IS NOT NULL AND #{@column} != '')"],
             '_null' => ["(#{@column} IS NULL)"],
             '_not_null' => ["(#{@column} IS NOT NULL)"],
             '_empty' => ["(#{@column} = '')"],
-            '_not_empty' => ["(#{@column} != '')"]
+            '_not_empty' => ["(#{@column} != '')"],
           }
         end
 
-      private
+        def boolean_unary_operators
+          generic_unary_operators.merge(
+            '_blank' => ["(#{@column} IS NULL)"],
+            '_empty' => ["(#{@column} IS NULL)"],
+            '_present' => ["(#{@column} IS NOT NULL)"],
+            '_not_empty' => ["(#{@column} IS NOT NULL)"],
+          )
+        end
 
         def range_filter(min, max)
           if min && max
@@ -170,12 +204,13 @@ module RailsAdmin
           when :string, :text             then build_statement_for_string_or_text
           when :enum                      then build_statement_for_enum
           when :belongs_to_association    then build_statement_for_belongs_to_association
+          when :uuid                      then build_statement_for_uuid
           end
         end
 
         def build_statement_for_boolean
-          return ["(#{@column} IS NULL OR #{@column} = ?)", false] if %w[false f 0].include?(@value)
-          return ["(#{@column} = ?)", true] if %w[true t 1].include?(@value)
+          return ["(#{@column} IS NULL OR #{@column} = ?)", false] if %w(false f 0).include?(@value)
+          return ["(#{@column} = ?)", true] if %w(true t 1).include?(@value)
         end
 
         def column_for_value(value)
@@ -189,19 +224,31 @@ module RailsAdmin
 
         def build_statement_for_string_or_text
           return if @value.blank?
-          @value = case @operator
-          when 'default', 'like'
-            "%#{@value.downcase}%"
-          when 'starts_with'
-            "#{@value.downcase}%"
-          when 'ends_with'
-            "%#{@value.downcase}"
-          when 'is', '='
-            "#{@value.downcase}"
-          else
-            return
+
+          unless ['postgresql', 'postgis'].include? ar_adapter
+            @value = @value.mb_chars.downcase
           end
-          ["(LOWER(#{@column}) #{like_operator} ?)", @value]
+
+          @value = begin
+            case @operator
+            when 'default', 'like'
+              "%#{@value}%"
+            when 'starts_with'
+              "#{@value}%"
+            when 'ends_with'
+              "%#{@value}"
+            when 'is', '='
+              @value
+            else
+              return
+            end
+          end
+
+          if ['postgresql', 'postgis'].include? ar_adapter
+            ["(#{@column} ILIKE ?)", @value]
+          else
+            ["(LOWER(#{@column}) LIKE ?)", @value]
+          end
         end
 
         def build_statement_for_enum
@@ -209,12 +256,14 @@ module RailsAdmin
           ["(#{@column} IN (?))", Array.wrap(@value)]
         end
 
-        def ar_adapter
-          ::ActiveRecord::Base.connection.adapter_name.downcase
+        def build_statement_for_uuid
+          if @value.to_s =~ /\A[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}\z/
+            column_for_value(@value)
+          end
         end
 
-        def like_operator
-          ar_adapter == 'postgresql' ? 'ILIKE' : 'LIKE'
+        def ar_adapter
+          ::ActiveRecord::Base.connection.adapter_name.downcase
         end
       end
     end

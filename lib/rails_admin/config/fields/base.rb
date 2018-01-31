@@ -2,19 +2,26 @@ require 'rails_admin/config/proxyable'
 require 'rails_admin/config/configurable'
 require 'rails_admin/config/hideable'
 require 'rails_admin/config/groupable'
+require 'rails_admin/config/inspectable'
 
 module RailsAdmin
   module Config
     module Fields
-      class Base
+      class Base # rubocop:disable ClassLength
         include RailsAdmin::Config::Proxyable
         include RailsAdmin::Config::Configurable
         include RailsAdmin::Config::Hideable
         include RailsAdmin::Config::Groupable
+        include RailsAdmin::Config::Inspectable
 
         attr_reader :name, :properties, :abstract_model
         attr_accessor :defined, :order, :section
         attr_reader :parent, :root
+
+        NAMED_INSTANCE_VARIABLES = [
+          :@parent, :@root, :@section, :@children_fields_registered,
+          :@associated_model_config, :@group, :@bindings
+        ].freeze
 
         def initialize(parent, name, properties)
           @parent = parent
@@ -57,7 +64,7 @@ module RailsAdmin
         end
 
         register_instance_option :filterable? do
-          !!searchable # rubocop:disable DoubleNegation
+          !!searchable
         end
 
         register_instance_option :search_operator do
@@ -71,34 +78,35 @@ module RailsAdmin
 
         # list of columns I should search for that field [{ column: 'table_name.column', type: field.type }, {..}]
         register_instance_option :searchable_columns do
-          @searchable_columns ||= case searchable
-          when true
-            [{column: "#{abstract_model.table_name}.#{name}", type: type}]
-          when false
-            []
-          when :all # valid only for associations
-            table_name = associated_model_config.abstract_model.table_name
-            associated_model_config.list.fields.collect { |f| {column: "#{table_name}.#{f.name}", type: f.type} }
-          else
-            [searchable].flatten.collect do |f|
-              if f.is_a?(String) && f.include?('.')                            #  table_name.column
-                table_name, column = f.split '.'
-                type = nil
-              elsif f.is_a?(Hash)                                              #  <Model|table_name> => <attribute|column>
-                am = f.keys.first.is_a?(Class) && AbstractModel.new(f.keys.first)
-                table_name = am && am.table_name || f.keys.first
-                column = f.values.first
-                property = am && am.properties.detect { |p| p.name == f.values.first.to_sym }
-                type = property && property.type
-              else                                                             #  <attribute|column>
-                am = (self.association? ? associated_model_config.abstract_model : abstract_model)
-                table_name = am.table_name
-                column = f
-                property = am.properties.detect { |p| p.name == f.to_sym }
-                type = property && property.type
+          @searchable_columns ||= begin
+            case searchable
+            when true
+              [{column: "#{abstract_model.table_name}.#{name}", type: type}]
+            when false
+              []
+            when :all # valid only for associations
+              table_name = associated_model_config.abstract_model.table_name
+              associated_model_config.list.fields.collect { |f| {column: "#{table_name}.#{f.name}", type: f.type} }
+            else
+              [searchable].flatten.collect do |f|
+                if f.is_a?(String) && f.include?('.')                            #  table_name.column
+                  table_name, column = f.split '.'
+                  type = nil
+                elsif f.is_a?(Hash)                                              #  <Model|table_name> => <attribute|column>
+                  am = f.keys.first.is_a?(Class) && AbstractModel.new(f.keys.first)
+                  table_name = am && am.table_name || f.keys.first
+                  column = f.values.first
+                  property = am && am.properties.detect { |p| p.name == f.values.first.to_sym }
+                  type = property && property.type
+                else                                                             #  <attribute|column>
+                  am = (association? ? associated_model_config.abstract_model : abstract_model)
+                  table_name = am.table_name
+                  column = f
+                  property = am.properties.detect { |p| p.name == f.to_sym }
+                  type = property && property.type
+                end
+                {column: "#{table_name}.#{column}", type: (type || :string)}
               end
-
-              {column: "#{table_name}.#{column}", type: (type || :string)}
             end
           end
         end
@@ -123,7 +131,9 @@ module RailsAdmin
         end
 
         register_instance_option :html_attributes do
-          {}
+          {
+            required: required?,
+          }
         end
 
         register_instance_option :default_value do
@@ -151,7 +161,7 @@ module RailsAdmin
         # Accessor for field's length restrictions per validations
         #
         register_instance_option :valid_length do
-          @valid_length ||= abstract_model.model.validators_on(name).detect { |v| v.kind == :length }.try { |v| v.options } || {}
+          @valid_length ||= abstract_model.model.validators_on(name).detect { |v| v.kind == :length }.try(&:options) || {}
         end
 
         register_instance_option :partial do
@@ -162,16 +172,19 @@ module RailsAdmin
         #
         # @see RailsAdmin::AbstractModel.properties
         register_instance_option :required? do
-          context = if bindings && bindings[:object]
-            bindings[:object].persisted? ? :update : :create
-          else
-            :nil
+          context = begin
+            if bindings && bindings[:object]
+              bindings[:object].persisted? ? :update : :create
+            else
+              :nil
+            end
           end
-          (@required ||= {})[context] ||= !!([name] + children_fields).uniq.detect do |column_name| # rubocop:disable DoubleNegation
+          (@required ||= {})[context] ||= !!([name] + children_fields).uniq.detect do |column_name|
             abstract_model.model.validators_on(column_name).detect do |v|
-              !v.options[:allow_nil] &&
-              [:presence, :numericality, :attachment_presence].include?(v.kind) &&
-              (v.options[:on] == context || v.options[:on].blank?)
+              !(v.options[:allow_nil] || v.options[:allow_blank]) &&
+                [:presence, :numericality, :attachment_presence].include?(v.kind) &&
+                (v.options[:on] == context || v.options[:on].blank?) &&
+                (v.options[:if].blank? && v.options[:unless].blank?)
             end
           end
         end
@@ -241,8 +254,8 @@ module RailsAdmin
         #
         # @see RailsAdmin::Config::Fields::Base.register_instance_option :required?
         def optional(state = nil, &block)
-          if !state.nil? || block # rubocop:disable NonNilCheck
-            required state.nil? ? proc { false == (instance_eval(&block)) } : false == state
+          if !state.nil? || block
+            required state.nil? ? proc { false == instance_eval(&block) } : false == state
           else
             optional?
           end
@@ -263,6 +276,15 @@ module RailsAdmin
         # Reader for field's value
         def value
           bindings[:object].safe_send(name)
+        rescue NoMethodError => e
+          raise e.exception <<-EOM.gsub(/^\s{10}/, '')
+          #{e.message}
+          If you want to use a RailsAdmin virtual field(= a field without corresponding instance method),
+          you should declare 'formatted_value' in the field definition.
+            field :#{name} do
+              formatted_value{ bindings[:object].call_some_method }
+            end
+          EOM
         end
 
         # Reader for nested attributes
@@ -286,6 +308,10 @@ module RailsAdmin
           (translated.is_a?(Hash) ? translated.to_a.first[1] : translated).html_safe
         end
 
+        def parse_value(value)
+          value
+        end
+
         def parse_input(_params)
           # overriden
         end
@@ -304,24 +330,6 @@ module RailsAdmin
 
         def form_value
           form_default_value.nil? ? formatted_value : form_default_value
-        end
-
-        def inspect
-          "#<#{self.class.name}[#{name}] #{
-            instance_variables.collect do |v|
-              value = instance_variable_get(v)
-              if [:@parent, :@root, :@section, :@children_fields_registered,
-                  :@associated_model_config, :@group, :@bindings].include? v
-                if value.respond_to? :name
-                  "#{v}=#{value.name.inspect}"
-                else
-                  "#{v}=#{value.class.name}"
-                end
-              else
-                "#{v}=#{value.inspect}"
-              end
-            end.join(', ')
-          }>"
         end
       end
     end
